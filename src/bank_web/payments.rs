@@ -82,37 +82,53 @@ pub async fn get<T: AccountService>(
 
 #[cfg(test)]
 pub mod tests {
-
     use super::*;
     use crate::{
         bank::{payment_instruments::Card, payments::Status},
-        bank_web::tests::{deserialize_response_body, get, post},
+        bank_web::tests::{deserialize_response_body, post},
     };
+    use axum::Router;
+
+    async fn do_payment(
+        router: &Router,
+        payment_amount: i32,
+        payment_card_number: String,
+        expected_status_code: StatusCode,
+        expected_status: Status,
+    ) {
+        let request_body = RequestBody {
+            payment: RequestData {
+                amount: payment_amount,
+                card_number: payment_card_number,
+            },
+        };
+
+        let response = post(router, "/api/payments", &request_body).await;
+        assert_eq!(response.status(), expected_status_code);
+
+        let response_body = deserialize_response_body::<ResponseBody>(response).await;
+        assert_eq!(response_body.data.amount, request_body.payment.amount);
+        assert_eq!(
+            response_body.data.card_number,
+            request_body.payment.card_number
+        );
+        assert_eq!(response_body.data.status, expected_status);
+        assert!((expected_status_code == StatusCode::CREATED) ^ response_body.data.id.is_nil())
+    }
 
     #[tokio::test]
     async fn should_approve_valid_payment() {
         let router = BankWeb::new_test().await.into_router();
-
-        let request_body = RequestBody {
-            payment: RequestData {
-                amount: 1205,
-                card_number: Card::new_test().into(),
-            },
-        };
-
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 201);
-
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.payment.amount);
-
-        let uri = format!("/api/payments/{}", response_body.data.id);
-        let response = get(&router, uri).await;
-        assert_eq!(response.status(), 200);
-
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.payment.amount);
-        assert_eq!(response_body.data.status, Status::Approved);
+        let payment_amount = 12_05;
+        let payment_card_number: String = Card::new_test().into();
+        do_payment(
+            &router,
+            payment_amount,
+            payment_card_number.clone(),
+            StatusCode::CREATED,
+            Status::Approved,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -121,19 +137,14 @@ pub mod tests {
             .await
             .into_router();
 
-        let request_body = RequestBody {
-            payment: RequestData {
-                amount: 1205,
-                card_number: Card::new_test().into(),
-            },
-        };
-
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 402);
-
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.payment.amount);
-        assert_eq!(response_body.data.status, Status::Declined);
+        do_payment(
+            &router,
+            12_05,
+            Card::new_test().into(),
+            StatusCode::PAYMENT_REQUIRED,
+            Status::Declined,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -142,51 +153,113 @@ pub mod tests {
             .await
             .into_router();
 
-        let request_body = RequestBody {
-            payment: RequestData {
-                amount: 1205,
-                card_number: Card::new_test().into(),
-            },
-        };
+        do_payment(
+            &router,
+            12_05,
+            Card::new_test().into(),
+            StatusCode::FORBIDDEN,
+            Status::Declined,
+        )
+        .await;
+    }
 
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 403);
+    #[tokio::test]
+    async fn should_fail_payment_and_return_503_for_service_unavailable() {
+        let router = BankWeb::new_test_with_response("service_unavailable")
+            .await
+            .into_router();
 
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.payment.amount);
-        assert_eq!(response_body.data.status, Status::Declined);
+        do_payment(
+            &router,
+            12_05,
+            Card::new_test().into(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Status::Failed,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_fail_payment_and_return_500_for_internal_error() {
+        let router = BankWeb::new_test_with_response("internal_error")
+            .await
+            .into_router();
+
+        do_payment(
+            &router,
+            12_05,
+            Card::new_test().into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Status::Failed,
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn should_return_204_for_zero_amount() {
         let router = BankWeb::new_test().await.into_router();
 
-        let request_body = RequestBody {
-            payment: RequestData {
-                amount: 0,
-                card_number: Card::new_test().into(),
-            },
-        };
+        do_payment(
+            &router,
+            0,
+            Card::new_test().into(),
+            StatusCode::NO_CONTENT,
+            Status::Declined,
+        )
+        .await;
+    }
 
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 204);
+    #[tokio::test]
+    async fn should_return_400_for_negative_amount() {
+        let router = BankWeb::new_test().await.into_router();
+
+        do_payment(
+            &router,
+            -1_00,
+            Card::new_test().into(),
+            StatusCode::BAD_REQUEST,
+            Status::Declined,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_return_422_for_invalid_card_format() {
+        let router = BankWeb::new_test().await.into_router();
+
+        let mut invalid_card_number: String = Card::new_test().into();
+        // TODO: parameterize to test with other invalid values?
+        invalid_card_number.truncate(invalid_card_number.len() - 1);
+        do_payment(
+            &router,
+            1_23,
+            invalid_card_number,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Status::Declined,
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn should_return_422_for_existing_card_number() {
         let router = BankWeb::new_test().await.into_router();
+        let payment_card_number: String = Card::new_test().into();
 
-        let request_body = RequestBody {
-            payment: RequestData {
-                amount: 123,
-                card_number: Card::new_test().into(),
-            },
-        };
-
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 201);
-
-        let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 422);
+        do_payment(
+            &router,
+            1_23,
+            payment_card_number.clone(),
+            StatusCode::CREATED,
+            Status::Approved,
+        )
+        .await;
+        do_payment(
+            &router,
+            1_23,
+            payment_card_number,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Status::Declined,
+        )
+        .await;
     }
 }

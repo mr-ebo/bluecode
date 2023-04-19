@@ -73,26 +73,29 @@ pub async fn get<T: AccountService>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bank::accounts::DummyService;
     use crate::{
         bank::{payment_instruments::Card, payments::Status},
         bank_web::{
             payments,
-            tests::{deserialize_response_body, get, post},
+            tests::{deserialize_response_body, post},
         },
     };
+    use axum::Router;
+    use std::future::Future;
 
-    async fn setup() -> (axum::Router, payments::ResponseBody) {
+    async fn setup_successful_payment(payment_amount: i32) -> (Router, payments::ResponseBody) {
         let router = BankWeb::new_test().await.into_router();
 
         let request_body = payments::RequestBody {
             payment: payments::RequestData {
-                amount: 1205,
+                amount: payment_amount,
                 card_number: Card::new_test().into(),
             },
         };
 
         let response = post(&router, "/api/payments", &request_body).await;
-        assert_eq!(response.status(), 201);
+        assert_eq!(response.status(), StatusCode::CREATED);
 
         let response_body = deserialize_response_body::<payments::ResponseBody>(response).await;
         assert_eq!(response_body.data.status, Status::Approved);
@@ -100,44 +103,107 @@ mod tests {
         (router, response_body)
     }
 
-    #[tokio::test]
-    async fn should_refund_valid_amount() {
-        let (router, payment_response_body) = setup().await;
-        let payment_id = payment_response_body.data.id;
+    async fn setup_failed_payment(
+        bank_web: impl Future<Output = BankWeb<DummyService>>,
+        payment_amount: i32,
+        expected_status_code: StatusCode,
+        expected_status: Status,
+    ) -> (Router, payments::ResponseBody) {
+        let router = bank_web.await.into_router();
 
-        let request_body = RequestBody {
-            refund: RequestData { amount: 42 },
+        let request_body = payments::RequestBody {
+            payment: payments::RequestData {
+                amount: payment_amount,
+                card_number: Card::new_test().into(),
+            },
         };
 
-        let uri = format!("/api/payments/{payment_id}/refunds",);
-        let response = post(&router, uri, &request_body).await;
-        assert_eq!(response.status(), 201);
+        let response = post(&router, "/api/payments", &request_body).await;
+        assert_eq!(response.status(), expected_status_code);
 
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.refund.amount);
-        let refund_id = response_body.data.id;
+        let response_body = deserialize_response_body::<payments::ResponseBody>(response).await;
+        assert_eq!(response_body.data.status, expected_status);
 
-        let uri = format!("/api/payments/{payment_id}/refunds/{refund_id}");
-        let response = get(&router, uri).await;
-        assert_eq!(response.status(), 200);
-
-        let response_body = deserialize_response_body::<ResponseBody>(response).await;
-        assert_eq!(response_body.data.amount, request_body.refund.amount);
+        (router, response_body)
     }
 
-    #[tokio::test]
-    async fn should_reject_refund_of_invalid_amount() {
-        let (router, payment_response_body) = setup().await;
-        let payment_id = payment_response_body.data.id;
-
+    async fn do_refund(
+        router: &Router,
+        refund_amount: i32,
+        payment_id: Uuid,
+        expected_status_code: StatusCode,
+    ) {
         let request_body = RequestBody {
             refund: RequestData {
-                amount: payment_response_body.data.amount + 1,
+                amount: refund_amount,
             },
         };
 
         let uri = format!("/api/payments/{payment_id}/refunds",);
-        let response = post(&router, uri, &request_body).await;
-        assert_eq!(response.status(), 422);
+        let response = post(router, uri, &request_body).await;
+        assert_eq!(response.status(), expected_status_code);
+
+        let response_body = deserialize_response_body::<ResponseBody>(response).await;
+        assert_eq!(response_body.data.amount, refund_amount);
+        assert!(expected_status_code.is_success() ^ response_body.data.id.is_nil());
+    }
+
+    #[tokio::test]
+    async fn should_full_refund() {
+        let amount = 10_00;
+        let (router, payment_response_body) = setup_successful_payment(amount).await;
+        let payment_id = payment_response_body.data.id;
+
+        do_refund(&router, amount, payment_id, StatusCode::CREATED).await;
+    }
+
+    #[tokio::test]
+    async fn should_partial_refunds_up_to_payment_amount() {
+        let (router, payment_response_body) = setup_successful_payment(10_00).await;
+        let payment_id = payment_response_body.data.id;
+
+        do_refund(&router, 2_00, payment_id, StatusCode::CREATED).await;
+        do_refund(&router, 5_00, payment_id, StatusCode::CREATED).await;
+        do_refund(&router, 3_00, payment_id, StatusCode::CREATED).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_refund_of_unknown_payment() {
+        let router = BankWeb::new_test().await.into_router();
+        let payment_id: Uuid = Uuid::new_v4();
+
+        do_refund(&router, 2_00, payment_id, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_refund_of_declined_payment() {
+        let payment_amount = 1205;
+        let (router, payment_response_body) = setup_failed_payment(
+            BankWeb::new_test_with_response("insufficient_funds"),
+            payment_amount,
+            StatusCode::PAYMENT_REQUIRED,
+            Status::Declined,
+        )
+        .await;
+        let payment_id = payment_response_body.data.id;
+
+        do_refund(&router, 2_00, payment_id, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_full_refund_with_excessive_amount() {
+        let (router, payment_response_body) = setup_successful_payment(10_00).await;
+        let payment_id = payment_response_body.data.id;
+
+        do_refund(&router, 11_00, payment_id, StatusCode::UNPROCESSABLE_ENTITY).await;
+    }
+
+    #[tokio::test]
+    async fn should_reject_partial_refund_with_excessive_amount() {
+        let (router, payment_response_body) = setup_successful_payment(10_00).await;
+        let payment_id = payment_response_body.data.id;
+
+        do_refund(&router, 2_00, payment_id, StatusCode::CREATED).await;
+        do_refund(&router, 9_00, payment_id, StatusCode::UNPROCESSABLE_ENTITY).await;
     }
 }
