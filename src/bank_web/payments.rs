@@ -1,12 +1,14 @@
+use super::BankWeb;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
+use payments::Status;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::BankWeb;
+use crate::bank::payments::{AccountServiceError, CreateError, InvalidArgumentError};
 use crate::bank::{accounts::AccountService, payments};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -25,7 +27,7 @@ pub struct ResponseData {
     pub id: Uuid,
     pub amount: i32,
     pub card_number: String,
-    pub status: payments::Status,
+    pub status: Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -33,31 +35,71 @@ pub struct ResponseBody {
     pub data: ResponseData,
 }
 
+fn status_from_error(e: CreateError) -> (StatusCode, Status) {
+    let status_code = match e {
+        CreateError::InvalidArgument(err) => match err {
+            InvalidArgumentError::NegativeAmount => StatusCode::BAD_REQUEST,
+            InvalidArgumentError::ZeroAmount => StatusCode::NO_CONTENT,
+            InvalidArgumentError::InvalidCardFormat => StatusCode::UNPROCESSABLE_ENTITY,
+        },
+        CreateError::AccountService(err) => match err {
+            AccountServiceError::InsufficientFunds => StatusCode::PAYMENT_REQUIRED,
+            AccountServiceError::InvalidAccountNumber => StatusCode::FORBIDDEN,
+            AccountServiceError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            AccountServiceError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+        CreateError::Database(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    let status = if status_code.is_server_error() {
+        Status::Failed
+    } else {
+        Status::Declined
+    };
+    (status_code, status)
+}
+
 pub async fn post<T: AccountService>(
     State(bank_web): State<BankWeb<T>>,
     Json(body): Json<RequestBody>,
 ) -> (StatusCode, Json<ResponseBody>) {
-    let payment_id = payments::insert(
+    let payment_amount = body.payment.amount;
+    let payment_card_number = body.payment.card_number.as_str();
+    payments::create(
         &bank_web.pool,
-        body.payment.amount,
-        body.payment.card_number,
-        payments::Status::Approved,
+        &bank_web.account_service,
+        payment_amount,
+        payment_card_number,
+        Status::Approved,
     )
     .await
-    .unwrap();
-
-    let payment = payments::get(&bank_web.pool, payment_id).await.unwrap();
-
-    (
-        StatusCode::CREATED,
-        Json(ResponseBody {
-            data: ResponseData {
-                id: payment.id,
-                amount: payment.amount,
-                card_number: payment.card_number,
-                status: payment.status,
-            },
-        }),
+    .map_or_else(
+        |e| {
+            let (payment_status_code, payment_status) = status_from_error(e);
+            (
+                payment_status_code,
+                Json(ResponseBody {
+                    data: ResponseData {
+                        id: Uuid::nil(),
+                        amount: payment_amount,
+                        card_number: payment_card_number.to_string(),
+                        status: payment_status,
+                    },
+                }),
+            )
+        },
+        |payment| {
+            (
+                StatusCode::CREATED,
+                Json(ResponseBody {
+                    data: ResponseData {
+                        id: payment.id,
+                        amount: payment.amount,
+                        card_number: payment.card_number,
+                        status: payment.status,
+                    },
+                }),
+            )
+        },
     )
 }
 

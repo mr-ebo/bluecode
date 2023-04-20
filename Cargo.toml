@@ -14,12 +14,16 @@ dotenvy = "0.15.6"
 futures = "0.3.26"
 http-body = "0.4.5"
 hyper = { version = "0.14.24", features = ["client"] }
+lazy_static = "1.4.0"
 opentelemetry = "0.18.0"
 opentelemetry-otlp = "0.11.0"
 rand = "0.8.5"
+regex = "1"
 serde = "1.0.152"
 serde_json = "1.0.93"
 sqlx = { version = "0.6.2", features = ["postgres", "runtime-tokio-rustls", "time", "uuid"] }
+strum = "0.24"
+strum_macros = "0.24"
 time = { version = "0.3.18", features = ["serde"] }
 tokio = { version = "1.25.0", features = ["macros"] }
 tower = "0.4.13"

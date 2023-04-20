@@ -1,7 +1,16 @@
+use crate::bank::accounts::{AccountService, HoldRef};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::str::FromStr;
+use strum_macros::EnumString;
 use time::PrimitiveDateTime;
 use uuid::Uuid;
+
+lazy_static! {
+    static ref CARD_NUMBER_REGEX: Regex = Regex::new(r"^\d{15}$").unwrap();
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +23,29 @@ pub enum Status {
     Declined,
     /// The payment was unable to complete (e.g. banking system crashed).
     Failed,
+}
+
+#[derive(Debug)]
+pub enum InvalidArgumentError {
+    NegativeAmount,
+    ZeroAmount,
+    InvalidCardFormat,
+}
+
+#[derive(Debug, Eq, PartialEq, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum AccountServiceError {
+    InsufficientFunds,
+    InvalidAccountNumber,
+    ServiceUnavailable,
+    InternalError,
+}
+
+#[derive(Debug)]
+pub enum CreateError {
+    InvalidArgument(InvalidArgumentError),
+    AccountService(AccountServiceError),
+    Database(sqlx::Error),
 }
 
 // Struct representing a payment.
@@ -33,36 +65,82 @@ pub struct Payment {
 pub async fn insert(
     pool: &PgPool,
     amount: i32,
-    card_number: String,
+    card_number: &str,
     status: Status,
-) -> Result<Uuid, sqlx::Error> {
-    sqlx::query!(
+) -> Result<Payment, sqlx::Error> {
+    sqlx::query_as!(
+        Payment,
         r#"
-            INSERT INTO payments ( id, amount, card_number, status, inserted_at, updated_at )
-            VALUES ( $1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP )
-            RETURNING id
+               INSERT INTO payments ( id, amount, card_number, status, inserted_at, updated_at )
+               VALUES ( $1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP )
+            RETURNING id, amount, card_number, inserted_at, updated_at, status as "status: _"
         "#,
         Uuid::new_v4(),
         amount,
-        card_number,
+        card_number.to_string(),
         status as Status
     )
     .fetch_one(pool)
     .await
-    .map(|record| record.id)
+}
+
+async fn hold_account(
+    account_service: &impl AccountService,
+    card_number: &str,
+    amount: i32,
+) -> Result<HoldRef, AccountServiceError> {
+    account_service
+        .place_hold(card_number, amount)
+        .await
+        .map_err(|msg| AccountServiceError::from_str(msg.as_str()).unwrap())
+}
+
+async fn validate_payment_inputs(
+    amount: i32,
+    card_number: &str,
+) -> Result<(), InvalidArgumentError> {
+    if amount < 0 {
+        Err(InvalidArgumentError::NegativeAmount)
+    } else if amount == 0 {
+        Err(InvalidArgumentError::ZeroAmount)
+    } else if !CARD_NUMBER_REGEX.is_match(card_number) {
+        Err(InvalidArgumentError::InvalidCardFormat)
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn create(
+    pool: &PgPool,
+    account_service: &impl AccountService,
+    amount: i32,
+    card_number: &str,
+    status: Status,
+) -> Result<Payment, CreateError> {
+    validate_payment_inputs(amount, card_number)
+        .await
+        .map_err(CreateError::InvalidArgument)?;
+    let _ = hold_account(account_service, card_number, amount)
+        .await
+        .map_err(CreateError::AccountService)?;
+    insert(pool, amount, card_number, status)
+        .await
+        // TODO: call account_service.release_hold(hold_ref)
+        .map_err(CreateError::Database)
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Payment, sqlx::Error> {
     sqlx::query_as!(
-            Payment,
-            r#"
-                SELECT id, amount, card_number, inserted_at, updated_at, status as "status: _"  FROM payments
-                WHERE id = $1
-            "#,
-            id
-        )
-        .fetch_one(pool)
-        .await
+        Payment,
+        r#"
+            SELECT id, amount, card_number, inserted_at, updated_at, status as "status: _"
+              FROM payments
+             WHERE id = $1
+        "#,
+        id
+    )
+    .fetch_one(pool)
+    .await
 }
 
 #[cfg(test)]
@@ -71,16 +149,14 @@ pub mod tests {
     use super::*;
     use crate::bank::payment_instruments::Card;
 
-    pub const PAYMENT_AMOUNT: i32 = 123;
+    pub const PAYMENT_AMOUNT: i32 = 1_23;
     pub const PAYMENT_STATUS: Status = Status::Approved;
 
     impl Payment {
         pub async fn new_test(pool: &PgPool) -> Result<Payment, sqlx::Error> {
-            let card = Card::new_test();
+            let card_number: String = Card::new_test().into();
 
-            let id = insert(pool, PAYMENT_AMOUNT, card.into(), PAYMENT_STATUS).await?;
-
-            get(pool, id).await
+            insert(pool, PAYMENT_AMOUNT, card_number.as_str(), PAYMENT_STATUS).await
         }
     }
 
