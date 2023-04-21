@@ -130,6 +130,7 @@ pub mod tests {
         bank_web::tests::{deserialize_response_body, post},
     };
     use axum::Router;
+    use rstest::rstest;
 
     async fn do_payment(
         router: &Router,
@@ -265,13 +266,14 @@ pub mod tests {
         .await;
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn should_return_422_for_invalid_card_format() {
+    async fn should_return_422_for_invalid_card_format(
+        #[values("xxx", "", " ", "12345123451234", "ABCDEABCDEABCDEABCDE")]
+        invalid_card_number: String,
+    ) {
         let router = BankWeb::new_test().await.into_router();
 
-        let mut invalid_card_number: String = Card::new_test().into();
-        // TODO: parameterize to test with other invalid values?
-        invalid_card_number.truncate(invalid_card_number.len() - 1);
         do_payment(
             &router,
             1_23,
