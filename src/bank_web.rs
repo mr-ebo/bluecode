@@ -83,18 +83,6 @@ pub mod tests {
             .expect("failed to send oneshot request")
     }
 
-    pub async fn get(
-        router: &Router,
-        uri: impl AsRef<str>,
-    ) -> hyper::Response<UnsyncBoxBody<Bytes, axum::Error>> {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri.as_ref())
-            .body(hyper::Body::empty())
-            .expect("failed to build GET request");
-        send_request(router, request).await
-    }
-
     pub async fn post<T: Serialize>(
         router: &Router,
         uri: impl AsRef<str>,

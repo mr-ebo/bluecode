@@ -21,20 +21,65 @@ pub struct Refund {
     pub updated_at: PrimitiveDateTime,
 }
 
-pub async fn insert(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Uuid, sqlx::Error> {
-    sqlx::query!(
+#[derive(Debug)]
+pub enum CreateError {
+    PaymentNotFound,
+    ExcessiveAmount,
+    Database(sqlx::Error),
+}
+
+pub async fn create(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Refund, CreateError> {
+    let mut transaction = pool.begin().await.map_err(CreateError::Database)?;
+    let initial_amount: Option<i32> = sqlx::query_scalar!(
         r#"
-            INSERT INTO refunds ( id, payment_id, amount, inserted_at, updated_at )
-            VALUES ( $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP )
-            RETURNING id
+            SELECT amount
+              FROM payments
+             WHERE id = $1 AND status = 'Approved'
+               FOR UPDATE
+       "#,
+        payment_id
+    )
+    .fetch_optional(&mut transaction)
+    .await
+    .map_err(CreateError::Database)?;
+
+    let initial_amount = initial_amount.ok_or(CreateError::PaymentNotFound)?;
+
+    if amount > initial_amount {
+        return Err(CreateError::ExcessiveAmount);
+    }
+
+    let refund = sqlx::query_as!(
+        Refund,
+        r#"
+               INSERT INTO refunds ( id, payment_id, amount, inserted_at, updated_at )
+               VALUES ( $1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP )
+            RETURNING id, payment_id, amount, inserted_at, updated_at
         "#,
         Uuid::new_v4(),
         payment_id,
         amount,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut transaction)
     .await
-    .map(|record| record.id)
+    .map_err(CreateError::Database)?;
+
+    sqlx::query!(
+        r#"
+            UPDATE payments
+               SET amount = $1
+             WHERE id = $2
+        "#,
+        initial_amount - amount,
+        payment_id
+    )
+    .execute(&mut transaction)
+    .await
+    .map_err(CreateError::Database)?;
+
+    transaction.commit().await.map_err(CreateError::Database)?;
+
+    Ok(refund)
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Refund, sqlx::Error> {
@@ -62,9 +107,14 @@ pub mod tests {
         pub async fn new_test(pool: &PgPool) -> Result<Refund, sqlx::Error> {
             let payment = Payment::new_test(pool).await?;
 
-            let id = insert(pool, payment.id, REFUND_AMOUNT).await?;
+            let refund = create(pool, payment.id, REFUND_AMOUNT)
+                .await
+                .map_err(|e| match e {
+                    CreateError::Database(err) => err,
+                    _ => panic!("Not a database error: {:?}", e),
+                })?;
 
-            get(pool, id).await
+            get(pool, refund.id).await
         }
     }
 

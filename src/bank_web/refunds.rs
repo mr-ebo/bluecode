@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::BankWeb;
+use crate::bank::refunds::CreateError;
 use crate::bank::{accounts::AccountService, refunds};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -31,25 +32,47 @@ pub struct ResponseBody {
     data: ResponseData,
 }
 
+fn status_from_error(e: CreateError) -> StatusCode {
+    match e {
+        CreateError::PaymentNotFound => StatusCode::NOT_FOUND,
+        CreateError::ExcessiveAmount => StatusCode::UNPROCESSABLE_ENTITY,
+        CreateError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 pub async fn post<T: AccountService>(
     State(bank_web): State<BankWeb<T>>,
     Path(payment_id): Path<Uuid>,
     Json(body): Json<RequestBody>,
 ) -> (StatusCode, Json<ResponseBody>) {
-    let refund_id = refunds::insert(&bank_web.pool, payment_id, body.refund.amount)
+    refunds::create(&bank_web.pool, payment_id, body.refund.amount)
         .await
-        .unwrap();
-
-    (
-        StatusCode::CREATED,
-        Json(ResponseBody {
-            data: ResponseData {
-                id: refund_id,
-                amount: body.refund.amount,
-                payment_id,
+        .map_or_else(
+            |e| {
+                (
+                    status_from_error(e),
+                    Json(ResponseBody {
+                        data: ResponseData {
+                            id: Uuid::nil(),
+                            amount: body.refund.amount,
+                            payment_id,
+                        },
+                    }),
+                )
             },
-        }),
-    )
+            |refund| {
+                (
+                    StatusCode::CREATED,
+                    Json(ResponseBody {
+                        data: ResponseData {
+                            id: refund.id,
+                            amount: body.refund.amount,
+                            payment_id,
+                        },
+                    }),
+                )
+            },
+        )
 }
 
 pub async fn get<T: AccountService>(
