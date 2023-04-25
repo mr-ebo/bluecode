@@ -56,6 +56,7 @@ pub enum CreateError {
 pub struct Payment {
     pub id: Uuid,
     pub amount: i32,
+    pub refunded_amount: i32,
     pub card_number: String,
     pub status: Status,
     pub inserted_at: PrimitiveDateTime,
@@ -73,7 +74,7 @@ pub async fn insert(
         r#"
                INSERT INTO payments ( id, amount, card_number, status, inserted_at, updated_at )
                VALUES ( $1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP )
-            RETURNING id, amount, card_number, inserted_at, updated_at, status as "status: _"
+            RETURNING id, amount, refunded_amount, card_number, inserted_at, updated_at, status as "status: _"
         "#,
         Uuid::new_v4(),
         amount,
@@ -133,7 +134,7 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Payment, sqlx::Error> {
     sqlx::query_as!(
         Payment,
         r#"
-            SELECT id, amount, card_number, inserted_at, updated_at, status as "status: _"
+            SELECT id, amount, refunded_amount, card_number, inserted_at, updated_at, status as "status: _"
               FROM payments
              WHERE id = $1
         "#,

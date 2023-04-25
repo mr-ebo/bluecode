@@ -29,26 +29,24 @@ pub enum CreateError {
 }
 
 pub async fn create(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Refund, CreateError> {
-    let mut transaction = pool.begin().await.map_err(CreateError::Database)?;
-    let initial_amount: Option<i32> = sqlx::query_scalar!(
+    let payment_exists = sqlx::query_scalar!(
         r#"
-            SELECT amount
+            SELECT COUNT(*) > 0
               FROM payments
              WHERE id = $1 AND status = 'Approved'
-               FOR UPDATE
        "#,
-        payment_id
+        payment_id,
     )
-    .fetch_optional(&mut transaction)
+    .fetch_one(pool)
     .await
-    .map_err(CreateError::Database)?;
+    .map_err(CreateError::Database)?
+    .unwrap_or(false);
 
-    let initial_amount = initial_amount.ok_or(CreateError::PaymentNotFound)?;
-
-    if amount > initial_amount {
-        return Err(CreateError::ExcessiveAmount);
+    if !payment_exists {
+        return Err(CreateError::PaymentNotFound);
     }
 
+    let mut transaction = pool.begin().await.map_err(CreateError::Database)?;
     let refund = sqlx::query_as!(
         Refund,
         r#"
@@ -64,18 +62,24 @@ pub async fn create(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Refu
     .await
     .map_err(CreateError::Database)?;
 
-    sqlx::query!(
+    let count = sqlx::query!(
         r#"
             UPDATE payments
-               SET amount = $1
+               SET refunded_amount = refunded_amount + $1
              WHERE id = $2
+               AND status = 'Approved'
+               AND refunded_amount + $1 <= amount
         "#,
-        initial_amount - amount,
+        amount,
         payment_id
     )
     .execute(&mut transaction)
     .await
     .map_err(CreateError::Database)?;
+
+    if count.rows_affected() == 0 {
+        return Err(CreateError::ExcessiveAmount);
+    }
 
     transaction.commit().await.map_err(CreateError::Database)?;
 

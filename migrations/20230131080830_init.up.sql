@@ -3,6 +3,7 @@ CREATE TYPE Status AS ENUM ('Processing', 'Approved', 'Declined', 'Failed');
 CREATE TABLE payments (
     id uuid PRIMARY KEY,
     amount integer NOT NULL,
+    refunded_amount integer NOT NULL DEFAULT 0,
     card_number character varying(255) NOT NULL,
     status Status  NOT NULL,
     inserted_at timestamp(0) without time zone NOT NULL,
