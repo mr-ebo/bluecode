@@ -37,6 +37,7 @@ pub struct ResponseBody {
 
 fn status_from_error(e: CreateError) -> (StatusCode, Status) {
     let status_code = match e {
+        CreateError::DuplicatedCardNumber => StatusCode::UNPROCESSABLE_ENTITY,
         CreateError::InvalidArgument(err) => match err {
             InvalidArgumentError::NegativeAmount => StatusCode::BAD_REQUEST,
             InvalidArgumentError::ZeroAmount => StatusCode::NO_CONTENT,
@@ -48,7 +49,7 @@ fn status_from_error(e: CreateError) -> (StatusCode, Status) {
             AccountServiceError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             AccountServiceError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         },
-        CreateError::Database(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        CreateError::Database(err) => panic!("Database error: {:?}", err),
     };
     let status = if status_code.is_server_error() {
         Status::Failed

@@ -36,7 +36,7 @@ fn status_from_error(e: CreateError) -> StatusCode {
     match e {
         CreateError::PaymentNotFound => StatusCode::NOT_FOUND,
         CreateError::ExcessiveAmount => StatusCode::UNPROCESSABLE_ENTITY,
-        CreateError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        CreateError::Database(err) => panic!("Database error: {:?}", err),
     }
 }
 

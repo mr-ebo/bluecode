@@ -43,6 +43,7 @@ pub enum AccountServiceError {
 
 #[derive(Debug)]
 pub enum CreateError {
+    DuplicatedCardNumber,
     InvalidArgument(InvalidArgumentError),
     AccountService(AccountServiceError),
     Database(sqlx::Error),
@@ -63,7 +64,7 @@ pub struct Payment {
     pub updated_at: PrimitiveDateTime,
 }
 
-pub async fn insert(
+async fn insert(
     pool: &PgPool,
     amount: i32,
     card_number: &str,
@@ -127,7 +128,16 @@ pub async fn create(
     insert(pool, amount, card_number, status)
         .await
         // TODO: call account_service.release_hold(hold_ref)
-        .map_err(CreateError::Database)
+        .map_err(|e| {
+            let err = e.as_database_error().unwrap();
+            if err.code().unwrap() == "23505"
+                && err.constraint() == Some("payments_card_number_index")
+            {
+                CreateError::DuplicatedCardNumber
+            } else {
+                CreateError::Database(e)
+            }
+        })
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Payment, sqlx::Error> {
