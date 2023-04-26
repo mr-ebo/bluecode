@@ -29,23 +29,6 @@ pub enum CreateError {
 }
 
 pub async fn create(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Refund, CreateError> {
-    let payment_exists = sqlx::query_scalar!(
-        r#"
-            SELECT COUNT(*) > 0
-              FROM payments
-             WHERE id = $1 AND status = 'Approved'
-       "#,
-        payment_id,
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(CreateError::Database)?
-    .unwrap_or(false);
-
-    if !payment_exists {
-        return Err(CreateError::PaymentNotFound);
-    }
-
     let mut transaction = pool.begin().await.map_err(CreateError::Database)?;
     let refund = sqlx::query_as!(
         Refund,
@@ -60,7 +43,16 @@ pub async fn create(pool: &PgPool, payment_id: Uuid, amount: i32) -> Result<Refu
     )
     .fetch_one(&mut transaction)
     .await
-    .map_err(CreateError::Database)?;
+    .map_err(|e| {
+        let err = e.as_database_error().unwrap();
+        // postgresql error codes: https://www.postgresql.org/docs/current/errcodes-appendix.html
+        // 23503 = foreign_key_violation
+        if err.code().unwrap() == "23503" && err.constraint() == Some("refunds_payment_id_fkey") {
+            CreateError::PaymentNotFound
+        } else {
+            CreateError::Database(e)
+        }
+    })?;
 
     let count = sqlx::query!(
         r#"
