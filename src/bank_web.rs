@@ -2,6 +2,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_tracing_opentelemetry::middleware::OtelAxumLayer;
 use sqlx::PgPool;
 
 use crate::bank::accounts::AccountService;
@@ -36,7 +37,7 @@ impl<T: AccountService> BankWeb<T> {
                 "/api/payments/:payment_id/refunds/:refund_id",
                 get(refunds::get::<T>),
             )
-            .layer(axum_tracing_opentelemetry::opentelemetry_tracing_layer())
+            .layer(OtelAxumLayer::default())
             .with_state(self)
             .with_state(())
     }
@@ -74,7 +75,7 @@ pub mod tests {
 
     pub async fn send_request(
         router: &Router,
-        request: Request<hyper::Body>,
+        request: Request<hyper::body>,
     ) -> hyper::Response<UnsyncBoxBody<Bytes, axum::Error>> {
         router
             .clone()
